@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Jarvis Demo - Sesli Asistan (Kadın Ses)</title>
+<style>
+  body{font-family:Inter,Arial,Helvetica,sans-serif;background:#0b0f14;color:#e6eef8;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;min-height:100vh;padding:28px}
+  .card{background:linear-gradient(180deg,#0f1720 0%, #0b0f14 100%);width:100%;max-width:720px;border-radius:12px;padding:20px;box-shadow:0 8px 24px rgba(2,6,23,0.7)}
+  h1{margin:0 0 8px;font-size:20px}
+  p.lead{margin:0 0 16px;color:#98a4b6}
+  button{background:#0ea5a2;border:none;padding:12px 18px;border-radius:10px;color:white;font-size:16px}
+  button.stop{background:#ef4444;margin-left:10px}
+  #status{margin-top:14px;color:#9fb3c8}
+  .log{margin-top:16px;background:#071021;padding:12px;border-radius:8px;color:#9fb3c8;max-height:200px;overflow:auto;font-size:13px}
+  .hint{margin-top:12px;color:#6b7c8f;font-size:13px}
+  select{margin-left:10px;padding:6px;border-radius:8px;background:#0b1720;color:#e6eef8;border:1px solid #163241}
+  .controls{display:flex;align-items:center;gap:8px}
+</style>
+</head>
+<body>
+  <div class="card" role="main" aria-label="Jarvis Demo">
+    <h1>Jarvis - Sesli Asistan Demo (Kadın ses)</h1>
+    <p class="lead">Telefonunla konuş: “Jarvis, TV'yi aç” — Jarvis sana Türkçe olarak cevap verecek. (Simülasyon)</p>
+
+    <div class="controls" aria-hidden="false">
+      <button id="start">🎤 Dinlemeye Başla</button>
+      <button id="stop" class="stop">⏹️ Durdur</button>
+      <label style="margin-left:auto">Ses: <select id="voiceSelect"></select></label>
+    </div>
+
+    <div id="status" aria-live="polite">Durum: Hazır</div>
+    <div class="hint">Not: İlk önce "Dinlemeye Başla" butonuna dokunman gerekir. TTS için telefonunda Türkçe ses paketi yoksa sayfa seni yönlendirir.</div>
+
+    <div class="log" id="log" aria-live="polite"></div>
+  </div>
+
+<script>
+/* Jarvis Demo - single-file
+   - wake word: "jarvis"
+   - rule-based komut eşleştirme
+   - kadın ses tercihi: öncelikle Türkçe voice seçilmeye çalışılır
+   - hiçbir input/form yok -> arama motoruna yazma problemi engellenir
+*/
+
+const WAKE = "jarvis";
+const COMMANDS = {
+  "xbox aç": "Xbox açılıyor... (simülasyon).",
+  "xbox kapat": "Xbox kapatıldı. (simülasyon).",
+  "tv aç": "Televizyon açıldı. (simülasyon).",
+  "tv kapat": "Televizyon kapatıldı. (simülasyon).",
+  "ışıkları aç": "Işıklar açıldı. (simülasyon).",
+  "ışıkları kapat": "Işıklar kapatıldı. (simülasyon).",
+  "oyun modu": "Oyun modu aktif. Işıklar kısıldı. (simülasyon).",
+  "sinema modu": "Sinema modu aktif. Işıklar loş. (simülasyon)."
+};
+
+const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const voiceSelect = document.getElementById('voiceSelect');
+
+let recognition = null;
+let recognizing = false;
+let preferredVoice = null;
+let voicesLoaded = false;
+
+function log(text){
+  const line = document.createElement('div');
+  line.textContent = new Date().toLocaleTimeString() + " — " + text;
+  logEl.prepend(line);
+}
+
+// --- Speech Synthesis setup ---
+function loadVoices(){
+  const vs = speechSynthesis.getVoices();
+  voiceSelect.innerHTML = "";
+  if(!vs || vs.length===0){
+    // voices may not be loaded yet
+    return;
+  }
+  voicesLoaded = true;
+
+  // find Turkish voices first; try to prefer a female-sounding name
+  const trVoices = vs.filter(v=> v.lang && v.lang.toLowerCase().startsWith('tr'));
+  const femaleHints = ['female','kadın','zira','ayda','zira','natal','natalie','laila','filiz','elif','ayşe','zehra','zeynep'];
+  let chosen = null;
+  if(trVoices.length){
+    // try to pick a voice whose name contains female hint
+    chosen = trVoices.find(v=> femaleHints.some(h=> v.name.toLowerCase().includes(h)));
+    if(!chosen) chosen = trVoices[0];
+  } else {
+    // no Turkish voice, fallback: pick first voice whose name hints female
+    chosen = vs.find(v=> femaleHints.some(h=> v.name.toLowerCase().includes(h))) || vs[0];
+  }
+
+  // populate select
+  vs.forEach(v=>{
+    const opt = document.createElement('option');
+    opt.value = v.name;
+    opt.textContent = `${v.name} — ${v.lang}`;
+    if(chosen && v.name===chosen.name) opt.selected = true;
+    voiceSelect.appendChild(opt);
+  });
+  preferredVoice = chosen ? chosen.name : vs[0].name;
+  log("Voice list yüklendi. Seçili: " + preferredVoice);
+}
+
+if (typeof speechSynthesis !== 'undefined'){
+  loadVoices();
+  speechSynthesis.onvoiceschanged = loadVoices;
+} else {
+  log("Tarayıcı speechSynthesis desteklemiyor.");
+}
+
+// function to speak with selected voice (female-preference)
+function speak(text){
+  if(!("speechSynthesis" in window)){
+    log("TTS desteklenmiyor.");
+    return;
+  }
+  // ensure we have a voice list
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "tr-TR";
+  // use selected voice if available
+  const vs = speechSynthesis.getVoices();
+  const selectedName = voiceSelect.value || preferredVoice;
+  if(vs && vs.length){
+    const v = vs.find(x=> x.name === selectedName) || vs.find(x=> x.lang && x.lang.toLowerCase().startsWith('tr')) || vs[0];
+    if(v) u.voice = v;
+  }
+  u.rate = 1;
+  u.pitch = 1;
+  u.onstart = ()=> log("Konuşma başladı: " + text);
+  u.onend = ()=> log("Konuşma bitti.");
+  u.onerror = (e)=> log("TTS hata: " + (e.error || e.message || JSON.stringify(e)));
+  try {
+    // Some browsers require a user gesture before speech — the "start" button provides that.
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  } catch(e){
+    log("TTS oynatma hatası: " + e.message);
+  }
+}
+
+// --- STT setup (webkitSpeechRecognition) ---
+function setupRecognition(){
+  if(!('webkitSpeechRecognition' in window)){
+    statusEl.textContent = "Tarayıcı SpeechRecognition desteklemiyor. Chrome tavsiye edilir.";
+    log("SpeechRecognition desteklenmiyor.");
+    return;
+  }
+  recognition = new webkitSpeechRecognition();
+  recognition.continuous = true;
+  recognition.interimResults = false;
+  recognition.lang = "tr-TR";
+
+  recognition.onstart = () => {
+    recognizing = true;
+    statusEl.textContent = "Durum: Dinleniyor...";
+    log("Dinleme başladı.");
+  };
+
+  recognition.onend = () => {
+    recognizing = false;
+    statusEl.textContent = "Durum: Durdu";
+    log("Dinleme durdu.");
+  };
+
+  recognition.onerror = (e) => {
+    log("STT hata: " + (e.error || JSON.stringify(e)));
+  };
+
+  recognition.onresult = (event) => {
+    const last = event.results[event.results.length - 1];
+    const text = last[0].transcript.trim().toLowerCase();
+    log("Duydu: " + text);
+    handleTranscript(text);
+  };
+}
+
+function handleTranscript(transcript){
+  // ensure we don't accidentally let browser handle text — no inputs on page so safe.
+  if(!transcript.includes(WAKE)) {
+    // optionally ignore background chatter
+    log("Wake word bulunamadı.");
+    return;
+  }
+  let cmd = transcript.split(WAKE)[1].trim();
+  if(!cmd){
+    speak("Evet?");
+    return;
+  }
+  // match commands (simple contains)
+  let matched = null;
+  for(const k in COMMANDS){
+    if(cmd.includes(k)){
+      matched = COMMANDS[k];
+      break;
+    }
+  }
+  if(matched){
+    // respond and simulate action
+    speak(matched);
+    log("Komut işlendi: " + cmd + " → " + matched);
+  } else {
+    speak("Bunu anlayamadım, tekrar edebilir misin?");
+    log("Komut anlaşılamadı: " + cmd);
+  }
+}
+
+// controls
+startBtn.addEventListener('click', async () => {
+  // Ensure voices loaded and microphone allowed
+  // Some devices require a user interaction to enable TTS; this click satisfies that.
+  if(!voicesLoaded){
+    // try to trigger voice load
+    speechSynthesis.getVoices();
+  }
+  // quick TTS check: if no tr voice, inform user with gentle guidance
+  const vs = speechSynthesis.getVoices();
+  const hasTr = vs.some(v=> v.lang && v.lang.toLowerCase().startsWith('tr'));
+  if(!hasTr){
+    // warn but continue (could still use fallback voice)
+    log("Cihazda Türkçe TTS sesi bulunamadı. Eğer ses çıkmazsa telefonunun TTS ayarlarından Türkçe ses indirin.");
+    // optional: offer a short test speech so user can see if any sound works
+    speak("Kısa test. Eğer beni duyamıyorsanız, telefonunuzdan Türkçe konuşma paketini indirmeniz gerekir.");
+  }
+  // get mic permission by starting recognition
+  if(!recognition) setupRecognition();
+  try{
+    recognition.start();
+  } catch(e){
+    // start may throw if already starting; ignore
+    log("Recognition start hatası: " + e.message);
+  }
+});
+
+stopBtn.addEventListener('click', ()=>{
+  if(recognition && recognizing){
+    recognition.stop();
+  } else {
+    log("Dinleme zaten durdu.");
+  }
+});
+
+// populate voice select change
+voiceSelect.addEventListener('change', ()=>{
+  log("Ses seçildi: " + voiceSelect.value);
+});
+
+// Prevent accidental navigation due to gestures: capture keydown for Enter and prevent default (mobile rarely sends)
+window.addEventListener('keydown', function(e){
+  if(e.key === 'Enter'){
+    e.preventDefault();
+  }
+}, {passive:false});
+
+// initial small help message
+log("Hazır. 'Dinlemeye Başla' düğmesine dokunup 'Jarvis, TV'yi aç' gibi konuşun.");
+
+/* Extra tip: if after deployment TTS hâlâ sessizse, kullanıcı telefonu için:
+   Android: Ayarlar > Dil ve Giriş > Metin okuma çıkışı > Google Metin Okuma Motoru > Ses verilerini indir > Türkçe
+   iPhone: Ayarlar > Erişilebilirlik > Sesli İçerik > Sesler > Türkçe (ses indir)
+*/
+</script>
+</body>
+</html>
